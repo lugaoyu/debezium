@@ -191,3 +191,343 @@ A big thank you to all the Debezium contributors!
 <a href="https://github.com/debezium/debezium/graphs/contributors">
   <img src="https://contributors-img.web.app/image?repo=debezium/debezium" />
 </a>
+
+# Oracle归档日志智能分段处理器
+
+## 概述
+
+Oracle归档日志智能分段处理器是一个高性能的Python工具，用于解决Oracle归档日志并行处理的性能瓶颈。通过智能分段算法，它能够将大批量的归档日志数据分成多个均匀的段，然后并行处理，显著提高处理效率。
+
+## 核心特性
+
+### 🎯 智能分段算法
+- **自适应分段**: 基于SCN范围内记录密度的采样估算，动态调整分段策略
+- **负载均衡**: 确保每个分段的记录数尽可能接近目标值，避免负载不均
+- **二分查找优化**: 使用二分查找算法精确定位分段边界
+
+### 🚀 高性能并行处理
+- **多线程处理**: 支持多线程并行处理各个分段
+- **批量处理**: 内置批量处理机制，减少I/O开销
+- **连接池**: 支持数据库连接池，提高连接复用率
+
+### 📊 智能监控与统计
+- **实时统计**: 提供详细的处理统计信息和性能指标
+- **准确性监控**: 跟踪分段估算的准确性，持续优化算法
+- **进度监控**: 实时显示处理进度和各分段状态
+
+## 安装
+
+### 环境要求
+- Python 3.7+
+- Oracle Database 11g+ (支持LogMiner)
+- Oracle Instant Client
+
+### 安装步骤
+
+1. 安装Python依赖:
+```bash
+pip install -r requirements.txt
+```
+
+2. 配置Oracle Instant Client (根据您的操作系统):
+```bash
+# Linux/macOS
+export LD_LIBRARY_PATH=/path/to/instantclient:$LD_LIBRARY_PATH
+
+# Windows
+set PATH=C:\path\to\instantclient;%PATH%
+```
+
+3. 确保Oracle用户具有LogMiner权限:
+```sql
+GRANT EXECUTE ON DBMS_LOGMNR TO your_user;
+GRANT EXECUTE ON DBMS_LOGMNR_D TO your_user;
+GRANT SELECT ON V_$LOGMNR_CONTENTS TO your_user;
+GRANT SELECT ON V_$LOGMNR_LOGS TO your_user;
+```
+
+## 快速开始
+
+### 基础使用
+
+```python
+from oracle_log_segmentation import (
+    OracleLogSegmentProcessor, 
+    SegmentationConfig
+)
+import cx_Oracle
+
+# 1. 配置数据库连接
+def create_connection():
+    return cx_Oracle.connect(
+        user='your_user',
+        password='your_password',
+        dsn='localhost:1521/ORCL'
+    )
+
+# 2. 配置LogMiner设置
+def setup_logminer(archive_log_file):
+    return f"""
+    BEGIN
+        DBMS_LOGMNR.ADD_LOGFILE(
+            LOGFILENAME => '{archive_log_file}',
+            OPTIONS => DBMS_LOGMNR.NEW
+        );
+        DBMS_LOGMNR.START_LOGMNR(
+            OPTIONS => DBMS_LOGMNR.SKIP_CORRUPTION
+        );
+    END;
+    """
+
+# 3. 定义记录处理函数
+def process_records(records):
+    for record in records:
+        print(f"处理操作: {record['operation']} on {record['table_name']}")
+        # 在这里实现您的业务逻辑
+
+# 4. 创建并使用处理器
+config = SegmentationConfig(
+    target_records_per_segment=100000,  # 每段10万条记录
+    max_segments=8,                     # 最多8个分段
+    sampling_ratio=0.001                # 0.1%采样率
+)
+
+processor = OracleLogSegmentProcessor(
+    connection_factory=create_connection,
+    logminer_setup_sql=setup_logminer('/path/to/archive.log'),
+    config=config
+)
+
+# 5. 并行处理归档日志
+stats = processor.process_archive_log_parallel(
+    start_scn=1000,
+    end_scn=100000,
+    record_processor=process_records,
+    max_workers=4
+)
+
+print(f"处理完成: {stats['total_records']}条记录，耗时{stats['total_time']:.2f}秒")
+```
+
+## 配置参数详解
+
+### SegmentationConfig
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `target_records_per_segment` | int | 100000 | 每个分段的目标记录数 |
+| `max_segments` | int | 20 | 最大分段数限制 |
+| `min_segments` | int | 2 | 最小分段数限制 |
+| `sampling_ratio` | float | 0.001 | 采样比例（0.1%） |
+| `max_sampling_records` | int | 10000 | 最大采样记录数 |
+| `tolerance_ratio` | float | 0.3 | 容差比例（30%） |
+
+### 性能调优建议
+
+#### 1. 分段策略优化
+```python
+# 大数据量场景（百万级记录）
+config = SegmentationConfig(
+    target_records_per_segment=200000,  # 增大分段大小
+    max_segments=16,                    # 增加最大分段数
+    sampling_ratio=0.0005,              # 降低采样率减少开销
+    tolerance_ratio=0.4                 # 放宽容差提高分段速度
+)
+
+# 小数据量场景（十万级记录）
+config = SegmentationConfig(
+    target_records_per_segment=50000,   # 减小分段大小
+    max_segments=6,                     # 减少分段数
+    sampling_ratio=0.002,               # 提高采样率保证准确性
+    tolerance_ratio=0.2                 # 严格控制分段均匀性
+)
+```
+
+#### 2. 并行度配置
+```python
+import os
+
+# 根据CPU核心数自动配置
+max_workers = min(os.cpu_count(), len(segments))
+
+# 考虑数据库连接数限制
+max_workers = min(max_workers, 8)  # 通常不超过8个并发连接
+```
+
+#### 3. 内存优化
+```python
+def memory_efficient_processor(records):
+    # 流式处理，避免大量数据在内存中积累
+    for record in records:
+        # 立即处理并释放
+        process_single_record(record)
+        
+    # 定期触发垃圾回收
+    if len(records) > 10000:
+        import gc
+        gc.collect()
+```
+
+## 高级用法
+
+### 1. 自定义分段策略
+
+```python
+class CustomSegmentationAlgorithm(AdaptiveSegmentationAlgorithm):
+    def create_segments(self, start_scn, end_scn):
+        # 实现您的自定义分段逻辑
+        # 例如：基于时间窗口分段、基于表名分段等
+        pass
+```
+
+### 2. 错误处理和重试
+
+```python
+def robust_processor(records):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # 处理记录
+            process_records_batch(records)
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"处理失败，已达到最大重试次数: {e}")
+                raise
+            logger.warning(f"处理失败，正在重试 ({attempt + 1}/{max_retries}): {e}")
+            time.sleep(2 ** attempt)  # 指数退避
+```
+
+### 3. 结果持久化
+
+```python
+def persistent_processor(records):
+    # 批量写入数据库
+    connection = get_target_connection()
+    cursor = connection.cursor()
+    
+    batch_data = []
+    for record in records:
+        batch_data.append((
+            record['scn'],
+            record['timestamp'],
+            record['operation'],
+            record['table_name'],
+            record['sql_redo']
+        ))
+    
+    cursor.executemany("""
+        INSERT INTO processed_changes 
+        (scn, timestamp, operation, table_name, sql_redo)
+        VALUES (?, ?, ?, ?, ?)
+    """, batch_data)
+    
+    connection.commit()
+    cursor.close()
+```
+
+## 监控和告警
+
+### 1. 性能监控
+
+```python
+def monitoring_processor(records):
+    start_time = time.time()
+    
+    # 处理记录
+    process_records(records)
+    
+    processing_time = time.time() - start_time
+    records_per_second = len(records) / processing_time
+    
+    # 性能告警
+    if records_per_second < 1000:  # 低于1000条/秒
+        logger.warning(f"处理速度较慢: {records_per_second:.1f} 条/秒")
+    
+    # 记录性能指标
+    metrics.gauge('processing.records_per_second', records_per_second)
+    metrics.gauge('processing.batch_size', len(records))
+```
+
+### 2. 数据质量监控
+
+```python
+def quality_monitoring_processor(records):
+    error_count = 0
+    warning_count = 0
+    
+    for record in records:
+        # 检查数据完整性
+        if not record.get('scn'):
+            error_count += 1
+            logger.error(f"记录缺少SCN: {record}")
+            continue
+            
+        # 检查可疑操作
+        if record['operation'] == 'DELETE' and 'CRITICAL' in record['table_name']:
+            warning_count += 1
+            logger.warning(f"关键表删除操作: {record['table_name']} at SCN {record['scn']}")
+    
+    # 质量报告
+    total_records = len(records)
+    error_rate = error_count / total_records if total_records > 0 else 0
+    
+    if error_rate > 0.01:  # 错误率超过1%
+        logger.error(f"数据质量告警: 错误率 {error_rate:.2%}")
+```
+
+## 常见问题解决
+
+### Q1: 分段不均匀怎么办？
+**A**: 调整采样参数：
+- 增加 `sampling_ratio` 提高采样准确性
+- 减少 `tolerance_ratio` 严格控制分段均匀性
+- 增加采样点数量（在代码中修改 `sample_points`）
+
+### Q2: 处理速度慢怎么办？
+**A**: 性能优化策略：
+- 增加 `max_workers` 提高并行度
+- 减少 `sampling_ratio` 降低采样开销
+- 优化记录处理函数，避免复杂计算
+- 使用批量处理和连接池
+
+### Q3: 内存占用过高怎么办？
+**A**: 内存优化措施：
+- 减少 `target_records_per_segment` 降低单段内存占用
+- 在处理函数中及时释放大对象
+- 使用流式处理避免数据积累
+- 定期调用 `gc.collect()`
+
+### Q4: LogMiner权限不足怎么办？
+**A**: 权限配置：
+```sql
+-- 以DBA身份执行
+GRANT EXECUTE ON DBMS_LOGMNR TO your_user;
+GRANT EXECUTE ON DBMS_LOGMNR_D TO your_user;
+GRANT SELECT ON V_$LOGMNR_CONTENTS TO your_user;
+GRANT SELECT ON V_$LOGMNR_LOGS TO your_user;
+GRANT SELECT ON V_$ARCHIVED_LOG TO your_user;
+```
+
+## 最佳实践
+
+1. **预分析**: 处理前先分析归档日志的SCN范围和记录分布
+2. **测试验证**: 在小范围数据上测试分段效果
+3. **监控调优**: 持续监控处理性能，根据实际情况调整参数
+4. **错误处理**: 实现完善的错误处理和重试机制
+5. **资源管理**: 合理控制并发数，避免对数据库造成过大压力
+
+## 许可证
+
+MIT License
+
+## 贡献指南
+
+欢迎提交Issue和Pull Request来改进这个项目！
+
+## 联系支持
+
+如果您在使用过程中遇到问题，请：
+1. 查看常见问题解决部分
+2. 提交Issue描述具体问题
+3. 提供错误日志和配置信息
